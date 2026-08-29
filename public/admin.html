@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tic Tac Toe Admin Dashboard</title>
+  <style>
+    body { background-color: #0d111d; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 30px; margin: 0; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    h1 { font-size: 1.8rem; background: linear-gradient(90deg, #c471ed, #f64f59); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin: 0; }
+    .live-badge { display: flex; align-items: center; gap: 8px; color: #2a9d8f; font-weight: bold; font-size: 0.9rem; }
+    .dot { width: 8px; height: 8px; background-color: #2a9d8f; border-radius: 50%; box-shadow: 0 0 8px #2a9d8f; }
+    table { width: 100%; border-collapse: collapse; background: #141b2d; border: 1px solid #232d4b; border-radius: 12px; overflow: hidden; }
+    th, td { padding: 14px 18px; text-align: left; border-bottom: 1px solid #232d4b; }
+    th { background: #101626; color: #7e8ca0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    tr:last-child td { border-bottom: none; }
+    .winner { color: #2a9d8f; font-weight: bold; }
+    .empty { text-align: center; color: #7e8ca0; padding: 30px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Live Match Results</h1>
+    <div class="live-badge">
+      <div class="dot"></div> Auto-refreshing
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Room Code</th>
+        <th>Player 1</th>
+        <th>Player 2</th>
+        <th>Winner</th>
+        <th>Time</th>
+      </tr>
+    </thead>
+    <tbody id="logs">
+      <tr>
+        <td colspan="5" class="empty">No matches completed yet.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <script>
+    async function loadLogs() {
+      try {
+        const res = await fetch('/api/matches');
+        const data = await res.json();
+        const tbody = document.getElementById('logs');
+
+        if (data.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" class="empty">No matches completed yet.</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = data.map(m => `
+          <tr>
+            <td><strong>${m.roomCode}</strong></td>
+            <td>${m.player1}</td>
+            <td>${m.player2}</td>
+            <td class="winner">${m.winner}</td>
+            <td>${m.time}</td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error('Failed to load logs:', err);
+      }
+    }
+
+    loadLogs();
+    setInterval(loadLogs, 2500);
+  </script>
+</body>
+</html>

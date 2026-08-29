@@ -1,1 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tic Tac Toe Online</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    :root {
+      --bg: #0d111d;
+      --card-bg: #141b2d;
+      --input-bg: #0e1424;
+      --border-color: #232d4b;
+      --text-muted: #7e8ca0;
+      --accent-gradient: linear-gradient(90deg, #e76f51 0%, #2a9d8f 100%);
+      --color-x: #f64f59;
+      --color-o: #2a9d8f;
+    }
 
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+    .title { font-size: 2.2rem; font-weight: 700; background: linear-gradient(90deg, #c471ed, #f64f59); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 6px; }
+    .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 24px; }
+    .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; padding: 28px; width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4); }
+    .form-group { margin-bottom: 18px; }
+    label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px; }
+    input { width: 100%; background: var(--input-bg); border: 1px solid var(--border-color); padding: 12px 14px; border-radius: 8px; color: #fff; font-size: 0.95rem; outline: none; }
+    input:focus { border-color: #435585; }
+    .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; background: var(--accent-gradient); color: #0b1320; font-weight: 700; font-size: 1rem; cursor: pointer; margin-top: 10px; transition: opacity 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .instructions { margin-top: 20px; font-size: 0.8rem; color: var(--text-muted); line-height: 1.45; }
+
+    #gameScreen { display: none; text-align: center; }
+    
+    .timer-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #1e293b;
+      border: 1px solid var(--border-color);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #f59e0b;
+      margin-bottom: 14px;
+    }
+    .timer-badge.urgent {
+      color: #f64f59;
+      border-color: #f64f59;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    .game-status { font-size: 1.15rem; margin-bottom: 16px; color: #cbd5e1; font-weight: 600; min-height: 2.2em; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 20px 0; }
+    .cell { aspect-ratio: 1; background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 8px; font-size: 2.4rem; font-weight: 800; display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; transition: background-color 0.2s, border-color 0.2s; }
+    .cell.x-mark { color: var(--color-x); }
+    .cell.o-mark { color: var(--color-o); }
+    .cell.winning { background: #1e3a5f; border-color: #38bdf8; }
+    .symbol-x { color: var(--color-x); font-weight: bold; }
+    .symbol-o { color: var(--color-o); font-weight: bold; }
+    .lobby-closed-note { font-size: 0.85rem; color: var(--text-muted); margin-top: 12px; }
+  </style>
+</head>
+<body>
+
+  <h1 class="title">Tic Tac Toe</h1>
+  <p class="subtitle">Play online with a friend, anywhere</p>
+
+  <div class="card" id="joinScreen">
+    <div class="form-group">
+      <label>Player name</label>
+      <input type="text" id="username" placeholder="e.g. Player 1">
+    </div>
+    <div class="form-group">
+      <label>Room code</label>
+      <input type="text" id="roomCode" placeholder="E.G. AB3K9">
+    </div>
+    <button class="btn" id="joinBtn">Join</button>
+    <p class="instructions">
+      Enter the code someone gave you and hit Join. If you're the first one in, the game will wait until the other player joins with the same code — then it starts automatically. Each move has a <strong>15-second timer</strong>.
+    </p>
+  </div>
+
+  <div class="card" id="gameScreen">
+    <div class="timer-badge" id="timerBadge">⏱️ <span id="timerText">15s</span></div>
+    <div class="game-status" id="statusText">Waiting for opponent...</div>
+    <div class="grid" id="board">
+      <div class="cell" data-index="0"></div>
+      <div class="cell" data-index="1"></div>
+      <div class="cell" data-index="2"></div>
+      <div class="cell" data-index="3"></div>
+      <div class="cell" data-index="4"></div>
+      <div class="cell" data-index="5"></div>
+      <div class="cell" data-index="6"></div>
+      <div class="cell" data-index="7"></div>
+      <div class="cell" data-index="8"></div>
+    </div>
+    <button class="btn" id="leaveBtn" style="display: none;" onclick="location.reload()">Back to Lobby</button>
+    <div class="lobby-closed-note" id="closedNote" style="display: none;">Lobby is now closed. Returning to home in <span id="countdown">5</span>s...</div>
+  </div>
+
+  <script>
+    const socket = io();
+    let mySymbol = null;
+    let myName = '';
+    let currentTurn = 'X';
+    let playersList = [];
+
+    const joinScreen = document.getElementById('joinScreen');
+    const gameScreen = document.getElementById('gameScreen');
+    const statusText = document.getElementById('statusText');
+    const timerBadge = document.getElementById('timerBadge');
+    const timerText = document.getElementById('timerText');
+    const cells = document.querySelectorAll('.cell');
+    const leaveBtn = document.getElementById('leaveBtn');
+    const closedNote = document.getElementById('closedNote');
+    const countdownSpan = document.getElementById('countdown');
+
+    document.getElementById('joinBtn').addEventListener('click', () => {
+      const nameInput = document.getElementById('username').value;
+      const roomCode = document.getElementById('roomCode').value;
+
+      if (!roomCode.trim()) {
+        alert('Please enter a room code');
+        return;
+      }
+
+      myName = nameInput.trim() || 'Player';
+      socket.emit('joinRoom', { name: myName, roomCode });
+    });
+
+    socket.on('joined', ({ symbol, playerName }) => {
+      mySymbol = symbol;
+      myName = playerName;
+      joinScreen.style.display = 'none';
+      gameScreen.style.display = 'block';
+    });
+
+    socket.on('waitingForOpponent', () => {
+      statusText.textContent = 'Waiting for opponent to join...';
+      timerBadge.style.display = 'none';
+    });
+
+    socket.on('gameStart', ({ players, turn }) => {
+      playersList = players;
+      currentTurn = turn;
+      timerBadge.style.display = 'inline-flex';
+      updateTurnStatus();
+    });
+
+    socket.on('timerTick', ({ timeLeft }) => {
+      timerText.textContent = `${timeLeft}s`;
+      if (timeLeft <= 5) {
+        timerBadge.classList.add('urgent');
+      } else {
+        timerBadge.classList.remove('urgent');
+      }
+    });
+
+    socket.on('moveMade', ({ board, turn }) => {
+      currentTurn = turn;
+      board.forEach((val, idx) => {
+        cells[idx].textContent = val || '';
+        cells[idx].classList.remove('x-mark', 'o-mark');
+        if (val === 'X') cells[idx].classList.add('x-mark');
+        if (val === 'O') cells[idx].classList.add('o-mark');
+      });
+      updateTurnStatus();
+    });
+
+    socket.on('gameOver', ({ winnerSymbol, winnerName, combo, reason, timedOutName }) => {
+      timerBadge.style.display = 'none';
+
+      if (winnerSymbol === 'draw') {
+        statusText.innerHTML = "🤝 Match ended in a <strong>Draw</strong>!";
+      } else if (reason === 'timeout') {
+        if (winnerSymbol === mySymbol) {
+          statusText.innerHTML = `⏰ ${timedOutName} ran out of time!<br>🎉 <span class="symbol-${winnerSymbol.toLowerCase()}">${myName}</span>, you won!`;
+        } else {
+          statusText.innerHTML = `⏰ You ran out of time!<br><span class="symbol-${winnerSymbol.toLowerCase()}">${winnerName}</span> won!`;
+        }
+      } else {
+        const winnerColorClass = `symbol-${winnerSymbol.toLowerCase()}`;
+        if (winnerSymbol === mySymbol) {
+          statusText.innerHTML = `🎉 <span class="${winnerColorClass}">${winnerName} (${winnerSymbol})</span> won the match!<br><span style="font-size: 0.9rem; color: #2a9d8f;">You won!</span>`;
+        } else {
+          statusText.innerHTML = `🏆 <span class="${winnerColorClass}">${winnerName} (${winnerSymbol})</span> won the match!<br><span style="font-size: 0.9rem; color: #f64f59;">${myName}, you lost!</span>`;
+        }
+      }
+
+      if (combo) {
+        combo.forEach(idx => cells[idx].classList.add('winning'));
+      }
+
+      leaveBtn.style.display = 'block';
+      closedNote.style.display = 'block';
+
+      let timeLeft = 5;
+      const timer = setInterval(() => {
+        timeLeft--;
+        countdownSpan.textContent = timeLeft;
+        if (timeLeft <= 0) {
+          clearInterval(timer);
+          location.reload();
+        }
+      }, 1000);
+    });
+
+    socket.on('opponentLeft', () => {
+      timerBadge.style.display = 'none';
+      statusText.textContent = 'Opponent disconnected. Lobby closed.';
+      leaveBtn.style.display = 'block';
+    });
+
+    socket.on('errorMsg', (msg) => alert(msg));
+
+    cells.forEach(cell => {
+      cell.addEventListener('click', () => {
+        const index = cell.getAttribute('data-index');
+        if (currentTurn === mySymbol && !cell.textContent) {
+          socket.emit('makeMove', { index: parseInt(index) });
+        }
+      });
+    });
+
+    function updateTurnStatus() {
+      const activePlayer = playersList.find(p => p.symbol === currentTurn);
+      const activeName = activePlayer ? activePlayer.name : currentTurn;
+
+      if (currentTurn === mySymbol) {
+        statusText.innerHTML = `Your Turn (<span class="symbol-${mySymbol.toLowerCase()}">${mySymbol}</span>)`;
+      } else {
+        statusText.innerHTML = `${activeName}'s Turn (<span class="symbol-${currentTurn.toLowerCase()}">${currentTurn}</span>)`;
+      }
+    }
+  </script>
+</body>
+</html>
