@@ -9,6 +9,52 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ---------- Live chat bridge (YouTube -> games) ----------
+const { startYouTubeChat } = require('./youtube-chat');
+const chatStatus = { source: 'none', state: 'off', messages: 0, likes: null, videoId: null, error: null };
+
+function broadcastChat(user, text) {
+  user = String(user || '').slice(0, 40); text = String(text || '').slice(0, 200);
+  if (!user || !text) return;
+  chatStatus.messages++;
+  io.emit('chat', { user, text });
+  io.emit('orbitChat', { user, text });   // older event name used by Orbit Royale
+}
+
+if (process.env.YT_API_KEY && (process.env.YT_VIDEO_ID || process.env.YT_CHANNEL_ID)) {
+  chatStatus.source = 'youtube';
+  startYouTubeChat({
+    apiKey: process.env.YT_API_KEY,
+    videoId: process.env.YT_VIDEO_ID,
+    channelId: process.env.YT_CHANNEL_ID,
+    pollMs: Number(process.env.YT_POLL_MS) || 10000,
+    onMessage: ({ user, text }) => broadcastChat(user, text),
+    onLikes: (n) => { chatStatus.likes = n; io.emit('likes', n); },
+    onStatus: (s) => {
+      Object.assign(chatStatus, { state: s.state, error: s.error || null });
+      if (s.videoId) chatStatus.videoId = s.videoId;
+      console.log(`[youtube chat] ${s.state}${s.videoId ? ' ' + s.videoId : ''}${s.error ? ': ' + s.error : ''}`);
+    }
+  });
+} else {
+  console.log('[youtube chat] off: set YT_API_KEY and YT_VIDEO_ID or YT_CHANNEL_ID to connect (see STREAMING.md)');
+}
+
+const isLocal = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+app.get('/api/chat/status', (req, res) => res.json(chatStatus));
+// Send a fake chat message for testing, e.g. curl -X POST localhost:3000/api/chat -H 'content-type: application/json' -d '{"user":"me","text":"Brazil"}'
+app.post('/api/chat', express.json(), (req, res) => {
+  if (!isLocal(req)) return res.status(403).json({ error: 'only allowed from this computer' });
+  broadcastChat(req.body && req.body.user, req.body && req.body.text);
+  res.json({ ok: true });
+});
+app.post('/api/likes', express.json(), (req, res) => {
+  if (!isLocal(req)) return res.status(403).json({ error: 'only allowed from this computer' });
+  chatStatus.likes = Number(req.body && req.body.likes) || 0; io.emit('likes', chatStatus.likes);
+  res.json({ ok: true });
+});
+io.on('connection', (socket) => { if (chatStatus.likes !== null) socket.emit('likes', chatStatus.likes); });
+
 const rooms = {};
 const matchHistory = [];
 const MOVE_TIMEOUT_SECONDS = 15;
