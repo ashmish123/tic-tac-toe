@@ -21,7 +21,9 @@ const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let scale = 1;
 function fit() { scale = Math.min(innerWidth / W, innerHeight / H); cv.style.width = W * scale + 'px'; cv.style.height = H * scale + 'px'; }
 addEventListener('resize', fit); fit();
-const AUTO = new URLSearchParams(location.search).has('auto');
+const params = new URLSearchParams(location.search);
+const LIVE = params.has('live');                 // live stream mode: computer plays, chat votes
+const AUTO = params.has('auto') || LIVE;
 
 const T = 60;                 // world pixels per tile
 const ZOOM = 1.9;             // camera zoom
@@ -172,8 +174,38 @@ function buildMapCanvas() {
   }
 }
 
+// ================= Live chat =================
+const VOTE_SECS = Math.max(10, Number(params.get('vote')) || 30);   // ?vote=45 for a longer voting window
+const live = { queue: [], recent: [], votes: { help: new Set(), haunt: new Set() }, voteT: VOTE_SECS,
+  survivor: 'A lost visitor', escapes: 0, deaths: 0, attempts: 0, lastResult: '' };
+function onChat(user, text) {
+  user = String(user || '').slice(0, 24); const t = String(text || '').trim().toUpperCase();
+  if (!user || !t) return;
+  live.recent = [user, ...live.recent.filter(u => u !== user)].slice(0, 40);
+  if (t.startsWith('!JOIN')) { if (!live.queue.includes(user) && live.queue.length < 60) live.queue.push(user); return; }
+  if (/^HELP\b/.test(t)) { live.votes.help.add(user); live.votes.haunt.delete(user); }
+  else if (/^HAUNT\b/.test(t)) { live.votes.haunt.add(user); live.votes.help.delete(user); }
+}
+function resolveVotes() {
+  const h = live.votes.help.size, x = live.votes.haunt.size;
+  live.votes.help.clear(); live.votes.haunt.clear();
+  if (!h && !x) return;
+  if (h > x) {
+    player.battery = Math.min(100, player.battery + 35); player.stamina = 100; monster.stun = 4;
+    sfxPickup(); say(`CHAT HELPED ${live.survivor.toUpperCase()}: +35% battery, IT is stunned`, 4);
+  } else if (x > h) {
+    monster.rage = 8; monster.state = 'hunt'; monster.huntT = 8; flickerT = 3; shake = 8;
+    sfxStinger(); say(`CHAT CHOSE HAUNT: IT KNOWS WHERE ${live.survivor.toUpperCase()} IS`, 4);
+  } else say('Chat is divided... nothing happens', 3);
+}
+if (LIVE) {
+  const sc = document.createElement('script'); sc.src = '/socket.io/socket.io.js';
+  sc.onload = () => { try { window.io().on('chat', m => onChat(m.user, m.text)); } catch (e) {} };
+  document.head.appendChild(sc);
+}
+
 // ================= State =================
-let phase, player, monster, items, exitTile, timeT, msg, caughtT, endT, shake, beatT, stepT, flick, grace;
+let phase, player, monster, items, exitTile, timeT, msg, caughtT, endT, shake, beatT, stepT, flick, grace, flickerT = 0;
 const keys = {};
 const mouse = { x: W / 2, y: H / 2 };
 function newGame() {
@@ -193,8 +225,10 @@ function newGame() {
   for (const t of tiles.filter(t => distStart[t.y][t.x] > 4).sort(() => Math.random() - 0.5).slice(0, 4))
     if (!items.some(i => Math.hypot(i.x - t.x - 0.5, i.y - t.y - 0.5) < 1)) items.push({ type: 'battery', x: t.x + 0.5, y: t.y + 0.5 });
   const mt = tiles.filter(t => distStart[t.y][t.x] > 30).sort(() => Math.random() - 0.5)[0] || far;
-  monster = { x: mt.x + 0.5, y: mt.y + 0.5, state: 'wander', target: null, huntT: 0, dist: null, repath: 0, lit: false, face: 0 };
-  timeT = 0; msg = { text: 'Find 3 fuses. Restore power. Get out.', t: 0, dur: 5 };
+  monster = { x: mt.x + 0.5, y: mt.y + 0.5, state: 'wander', target: null, huntT: 0, dist: null, repath: 0, lit: false, face: 0, stun: 0, rage: 0 };
+  live.survivor = live.queue.shift() || (live.recent.length ? live.recent[ri(live.recent.length)] : 'A lost visitor');
+  live.attempts++; live.votes.help.clear(); live.votes.haunt.clear(); live.voteT = VOTE_SECS; flickerT = 0;
+  timeT = 0; msg = LIVE ? { text: `${live.survivor} enters Ward 13...`, t: 0, dur: 5 } : { text: 'Find 3 fuses. Restore power. Get out.', t: 0, dur: 5 };
   caughtT = 0; endT = 0; shake = 0; beatT = 0; stepT = 0; flick = 0; grace = 8;
   phase = 'play';
 }
@@ -296,6 +330,9 @@ function update(dt) {
   if (phase !== 'play') return;
   timeT += dt; grace -= dt;
   const p = player, m = monster;
+  if (LIVE) { live.voteT -= dt; if (live.voteT <= 0) { live.voteT = VOTE_SECS; resolveVotes(); } }
+  flickerT = Math.max(0, flickerT - dt); m.stun = Math.max(0, m.stun - dt); m.rage = Math.max(0, m.rage - dt);
+  if (m.rage > 0) { m.state = 'hunt'; m.huntT = Math.max(m.huntT, 1); m.target = { x: p.x, y: p.y }; }
 
   // ---- player ----
   let mx = 0, my = 0;
@@ -315,7 +352,7 @@ function update(dt) {
   if (p.moving) { stepT -= dt; if (stepT <= 0) { stepT = p.running ? 0.24 : 0.42; sfxStep(p.running ? 0.12 : 0.05); } }
 
   if (p.light) { p.battery = Math.max(0, p.battery - 1.5 * dt); if (!p.battery) { p.light = false; say('The flashlight died...'); } }
-  flick = p.light && p.battery < 20 ? (Math.random() < 0.08 ? 1 : flick * 0.8) : 0;
+  flick = p.light && (p.battery < 20 || flickerT > 0) ? (Math.random() < (flickerT > 0 ? 0.3 : 0.08) ? 1 : flick * 0.8) : 0;
 
   for (const it of items.slice()) if (Math.hypot(it.x - p.x, it.y - p.y) < 0.55) {
     items.splice(items.indexOf(it), 1); sfxPickup();
@@ -323,7 +360,7 @@ function update(dt) {
     else { p.battery = Math.min(100, p.battery + 45); say('Battery +45%'); }
   }
   if (Math.floor(p.x) === exitTile.x && Math.floor(p.y) === exitTile.y) {
-    if (p.fuses >= 3) { phase = 'won'; endT = 0; sfxPickup(); return; }
+    if (p.fuses >= 3) { phase = 'won'; endT = 0; live.escapes++; sfxPickup(); return; }
     else if (!msg) say(`The door has no power. ${3 - p.fuses} fuse(s) missing.`);
   }
 
@@ -346,9 +383,11 @@ function update(dt) {
   const v = steer(m, m.dist, m.target);
   let mspd = m.state === 'hunt' ? 3.5 : 1.6;
   if (m.lit) mspd *= 0.35;
+  if (m.rage > 0) mspd *= 1.25;
+  if (m.stun > 0) mspd *= 0.12;
   if (v) { const l = Math.hypot(v.x, v.y) || 1; moveBody(m, v.x / l * mspd * dt, v.y / l * mspd * dt, 0.3); }
   m.face += dt;
-  if (d < 0.55) { phase = 'caught'; caughtT = 0; sfxScream(); }
+  if (d < 0.55) { phase = 'caught'; caughtT = 0; live.deaths++; sfxScream(); }
 
   // heartbeat speeds up as it gets closer
   if (d < 11) { beatT -= dt; if (beatT <= 0) { beatT = 0.35 + (d / 11) * 1.1; sfxThump(0.25 + (1 - d / 11) * 0.5); } }
@@ -475,6 +514,29 @@ function bar(x, y, w, h, f, color, label) {
   ctx.fillStyle = color; ctx.fillRect(x, y, w * Math.max(0, f), h);
   ctx.fillStyle = '#ccc'; ctx.font = '600 16px monospace'; ctx.textAlign = 'left'; ctx.fillText(label, x, y - 8);
 }
+function liveHud() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  // survivor name
+  ctx.textAlign = 'left'; ctx.fillStyle = '#e8e2d6'; ctx.font = '600 22px Georgia, serif';
+  ctx.fillText(`Survivor: ${live.survivor}`, 42, 168);
+  // vote meter
+  const h = live.votes.help.size, x = live.votes.haunt.size, tot = h + x, cx = W / 2, wB = 560, y = 40;
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(cx - wB / 2 - 20, y - 10, wB + 40, 92);
+  ctx.textAlign = 'center'; ctx.font = '700 18px monospace'; ctx.fillStyle = '#ccc';
+  ctx.fillText(`CHAT DECIDES IN ${Math.ceil(live.voteT)}s`, cx, y + 12);
+  const f = tot ? h / tot : 0.5;
+  ctx.fillStyle = '#7dff9a'; ctx.fillRect(cx - wB / 2, y + 26, wB * f, 22);
+  ctx.fillStyle = '#c21b1b'; ctx.fillRect(cx - wB / 2 + wB * f, y + 26, wB * (1 - f), 22);
+  ctx.font = '800 20px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = '#7dff9a'; ctx.fillText(`HELP ${h}`, cx - wB / 2, y + 74);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ff5a5a'; ctx.fillText(`${x} HAUNT`, cx + wB / 2, y + 74);
+  // how to join + scoreboard
+  ctx.textAlign = 'right'; ctx.font = '600 20px monospace'; ctx.fillStyle = '#e8e2d6';
+  ctx.fillText('Type HELP or HAUNT in chat', W - 40, 60);
+  ctx.fillText('Type !join to be the next survivor', W - 40, 88);
+  ctx.fillStyle = '#999'; ctx.font = '600 18px monospace';
+  ctx.fillText(`Escapes ${live.escapes} · Deaths ${live.deaths}`, W - 40, 124);
+  ctx.fillText(`Next: ${live.queue[0] || 'anyone in chat'}${live.queue.length > 1 ? ` (+${live.queue.length - 1} waiting)` : ''}`, W - 40, 150);
+}
 function hud(t) {
   const p = player;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -484,7 +546,8 @@ function hud(t) {
   ctx.fillText(`TIME ${Math.floor(timeT / 60)}:${String(Math.floor(timeT % 60)).padStart(2, '0')}`, 42, 136);
   bar(40, H - 90, 260, 14, p.battery / 100, p.battery < 20 ? '#ff5a3a' : '#f1d27a', `FLASHLIGHT ${Math.ceil(p.battery)}%`);
   bar(40, H - 40, 260, 10, p.stamina / 100, '#7fb6ff', 'STAMINA');
-  if (AUTO) { ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.font = '600 16px monospace'; ctx.textAlign = 'right'; ctx.fillText('AUTOPILOT', W - 40, 60); }
+  if (LIVE) liveHud();
+  else if (AUTO) { ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.font = '600 16px monospace'; ctx.textAlign = 'right'; ctx.fillText('AUTOPILOT', W - 40, 60); }
   else { ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.font = '500 15px monospace'; ctx.textAlign = 'right';
     ctx.fillText('WASD move · SHIFT run · MOUSE aim · F flashlight', W - 40, H - 36); }
   if (msg) {
@@ -514,7 +577,9 @@ function drawJumpscare() {
 
 function endScreen(title, sub, color) {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = 'rgba(0,0,0,.88)'; ctx.fillRect(0, 0, W, H);
-  ctx.textAlign = 'center'; ctx.fillStyle = color; ctx.font = '900 110px Georgia, serif'; ctx.fillText(title, W / 2, H / 2 - 20);
+  ctx.textAlign = 'center'; ctx.fillStyle = color;
+  let fs = 110; do { ctx.font = `900 ${fs}px Georgia, serif`; fs -= 6; } while (ctx.measureText(title).width > W - 120 && fs > 30);
+  ctx.fillText(title, W / 2, H / 2 - 20);
   ctx.fillStyle = '#bbb'; ctx.font = '600 30px monospace'; ctx.fillText(sub, W / 2, H / 2 + 50);
   ctx.fillStyle = '#777'; ctx.font = '500 22px monospace'; ctx.fillText(AUTO ? 'Next attempt starting…' : 'Press R or click to try again', W / 2, H / 2 + 110);
 }
@@ -540,13 +605,13 @@ function frame(now) {
   else if (phase === 'caught') drawJumpscare();
   else {
     drawWorld(clock); hud(clock);
-    if (phase === 'dead') endScreen('YOU DIED', `It found you after ${Math.floor(timeT)}s · fuses ${player.fuses}/3`, '#a31515');
-    if (phase === 'won') endScreen('YOU ESCAPED', `Escaped Ward 13 in ${Math.floor(timeT / 60)}:${String(Math.floor(timeT % 60)).padStart(2, '0')}`, '#7dff9a');
+    if (phase === 'dead') endScreen(LIVE ? `${live.survivor.toUpperCase()} DIED` : 'YOU DIED', `It found ${LIVE ? 'them' : 'you'} after ${Math.floor(timeT)}s · fuses ${player.fuses}/3`, '#a31515');
+    if (phase === 'won') endScreen(LIVE ? `${live.survivor.toUpperCase()} ESCAPED` : 'YOU ESCAPED', `Escaped Ward 13 in ${Math.floor(timeT / 60)}:${String(Math.floor(timeT % 60)).padStart(2, '0')}`, '#7dff9a');
   }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-window.ward13 = { state: () => ({ phase, t: +timeT.toFixed(1), fuses: player && player.fuses, battery: player && Math.round(player.battery), monster: monster && monster.state, dist: player && +hyp(player, monster).toFixed(1) }) };
+window.ward13 = { chat: onChat, live, state: () => ({ phase, t: +timeT.toFixed(1), fuses: player && player.fuses, battery: player && Math.round(player.battery), monster: monster && monster.state, dist: player && +hyp(player, monster).toFixed(1) }) };
 })();
 </script>
 </body>

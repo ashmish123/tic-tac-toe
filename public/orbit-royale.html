@@ -124,7 +124,8 @@ const MIN_PLAYERS = 12, MAX_PLAYERS = 60;
 const radiusOf = m => 7 + 3.1 * Math.sqrt(m);
 
 // ---------- State ----------
-const settings = { bots: true, likes: 0, goal: 500, battleLen: 180 };
+const LIVE = new URLSearchParams(location.search).has('live');   // ?live = real chat only, no demo bots
+const settings = { bots: !LIVE, likes: 0, goal: 500, battleLen: 180 };
 let streamStart = performance.now();
 let phase = 'lobby', phaseT = 0, round = 1;
 let planets = [], comets = [], particles = [], blackHoles = [];
@@ -181,7 +182,8 @@ window.orbitChat = onChat;
 (function connectSocket() {
   const s = document.createElement('script');
   s.src = '/socket.io/socket.io.js';
-  s.onload = () => { try { const io_ = window.io(); io_.on('orbitChat', m => onChat(m.user, m.text)); } catch (e) {} };
+  s.onload = () => { try { const io_ = window.io(); io_.on('orbitChat', m => onChat(m.user, m.text));
+    io_.on('likes', n => { settings.likes = n; syncSettingsUI(); }); } catch (e) {} };
   s.onerror = () => {};
   document.head.appendChild(s);
 })();
@@ -672,6 +674,7 @@ window.orbitState = () => ({ phase, round, t: +phaseT.toFixed(1), alive: planets
 // ---------- Settings UI ----------
 const $ = id => document.getElementById(id);
 function syncSettingsUI() { $('setLikes').value = settings.likes; $('setGoal').value = settings.goal; }
+$('setBots').checked = settings.bots;
 $('setBots').onchange = e => settings.bots = e.target.checked;
 $('setLikes').oninput = e => settings.likes = Math.max(0, +e.target.value || 0);
 $('setGoal').oninput = e => settings.goal = Math.max(1, +e.target.value || 1);
