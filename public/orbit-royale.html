@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbit Royale</title>
+<style>
+  :root { --bg:#04050c; --panel:#0d1124; --text:#eef1ff; --muted:#8b93b8; --accent:#ffb84d; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); overflow:hidden;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; background:var(--bg); }
+  #settings { position:fixed; top:16px; left:16px; background:var(--panel); border:1px solid #2a3160;
+    border-radius:12px; padding:16px; width:300px; display:none; z-index:5; font-size:14px; }
+  #settings h3 { margin:0 0 10px; font-size:16px; }
+  #settings label { display:flex; justify-content:space-between; align-items:center; margin:8px 0; gap:8px; }
+  #settings input[type=number], #settings input[type=text] { width:120px; background:#060814; color:var(--text);
+    border:1px solid #2a3160; border-radius:6px; padding:5px 7px; }
+  #settings button { background:var(--accent); color:#1a1200; border:0; border-radius:6px; padding:7px 10px;
+    font-weight:700; cursor:pointer; margin:4px 4px 0 0; }
+  #settings .hint { color:var(--muted); font-size:12px; line-height:1.5; margin-top:10px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1920" height="1080"></canvas></div>
+
+<div id="settings">
+  <h3>Streamer settings (press S to close)</h3>
+  <label>Demo chat bots <input type="checkbox" id="setBots" checked></label>
+  <label>Likes now <input type="number" id="setLikes" min="0" value="0"></label>
+  <label>Like goal <input type="number" id="setGoal" min="1" value="500"></label>
+  <label>Battle length (s) <input type="number" id="setLen" min="30" value="180"></label>
+  <label>Test chat <input type="text" id="setChat" placeholder="type a country, Enter"></label>
+  <button id="btnChapters">Download chapters</button>
+  <button id="btnClock">Reset stream clock</button>
+  <div class="hint">
+    Hotkeys: <b>S</b> settings · <b>C</b> download chapters · <b>N</b> skip to next phase<br>
+    Chat input: call <code>window.orbitChat(user, text)</code> or send a socket.io <code>orbitChat</code> event.
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+// ---------- Canvas & scaling ----------
+const W = 1920, H = 1080;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = (W * s) + 'px';
+  cv.style.height = (H * s) + 'px';
+}
+addEventListener('resize', fit); fit();
+
+// ---------- Countries ----------
+const COUNTRY_LIST = [
+  ['af','Afghanistan'],['dz','Algeria'],['ar','Argentina'],['au','Australia'],['at','Austria'],
+  ['bd','Bangladesh'],['be','Belgium'],['bo','Bolivia'],['br','Brazil',['brasil']],['cm','Cameroon'],
+  ['ca','Canada'],['cl','Chile'],['cn','China'],['co','Colombia'],['hr','Croatia'],['cu','Cuba'],
+  ['cz','Czechia',['czech republic','czech']],['dk','Denmark'],['ec','Ecuador'],['eg','Egypt'],
+  ['et','Ethiopia'],['fi','Finland'],['fr','France'],['de','Germany',['deutschland']],['gh','Ghana'],
+  ['gr','Greece'],['hu','Hungary'],['in','India',['bharat']],['id','Indonesia'],['ir','Iran'],
+  ['iq','Iraq'],['ie','Ireland'],['il','Israel'],['it','Italy',['italia']],['jm','Jamaica'],
+  ['jp','Japan'],['jo','Jordan'],['kz','Kazakhstan'],['ke','Kenya'],['la','Laos',['lao']],
+  ['my','Malaysia'],['mx','Mexico'],['ma','Morocco'],['np','Nepal'],['nl','Netherlands',['holland']],
+  ['nz','New Zealand'],['ng','Nigeria'],['no','Norway'],['pk','Pakistan'],['pg','Papua New Guinea',['png']],
+  ['py','Paraguay'],['pe','Peru'],['ph','Philippines',['philipines','pilipinas','phillipines']],
+  ['pl','Poland'],['pt','Portugal'],['qa','Qatar'],['ro','Romania'],['ru','Russia'],
+  ['sa','Saudi Arabia',['saudi','ksa']],['sn','Senegal'],['rs','Serbia'],['sg','Singapore'],
+  ['za','South Africa'],['kr','South Korea',['korea']],['es','Spain',['espana']],['lk','Sri Lanka'],
+  ['se','Sweden'],['ch','Switzerland'],['th','Thailand'],['tn','Tunisia'],['tr','Turkey',['turkiye']],
+  ['ua','Ukraine'],['ae','UAE',['united arab emirates','emirates']],
+  ['gb','United Kingdom',['uk','britain','great britain','england']],
+  ['us','USA',['united states','america','us']],['uy','Uruguay'],['uz','Uzbekistan'],
+  ['ve','Venezuela'],['vn','Vietnam',['viet nam']]
+];
+const COUNTRIES = {};
+const ALIASES = [];   // [normalizedName, code]
+function hashHue(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 360; }
+for (const [code, name, aliases = []] of COUNTRY_LIST) {
+  COUNTRIES[code] = { code, name, hue: hashHue(code + name), img: null, imgOk: false };
+  ALIASES.push([norm(name), code]);
+  for (const a of aliases) ALIASES.push([norm(a), code]);
+}
+ALIASES.sort((a, b) => b[0].length - a[0].length); // longest match first
+function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+// Flag images (optional: falls back to a coloured planet if offline)
+function loadFlag(c) {
+  if (c.img) return;
+  c.img = new Image();
+  c.img.crossOrigin = 'anonymous';
+  c.img.onload = () => { c.imgOk = true; };
+  c.img.src = `https://flagcdn.com/w160/${c.code}.png`;
+}
+
+// Find a country in a chat message: flag emoji, exact name, or whole-word name
+function parseCountry(text) {
+  const cps = [...text].map(ch => ch.codePointAt(0));
+  for (let i = 0; i + 1 < cps.length; i++) {
+    const a = cps[i], b = cps[i + 1];
+    if (a >= 0x1F1E6 && a <= 0x1F1FF && b >= 0x1F1E6 && b <= 0x1F1FF) {
+      const code = String.fromCharCode(a - 0x1F1E6 + 97, b - 0x1F1E6 + 97);
+      if (COUNTRIES[code]) return code;
+    }
+  }
+  const n = norm(text);
+  if (!n) return null;
+  for (const [alias, code] of ALIASES) if (n === alias) return code;
+  const padded = ' ' + n + ' ';
+  for (const [alias, code] of ALIASES)
+    if (alias.length >= 4 && padded.includes(' ' + alias + ' ')) return code;
+  return null;
+}
+
+// ---------- Game constants ----------
+const CX = 720, CY = 540, ARENA_R = 500;
+const SUN_GM = 6.0e6, PLANET_G = 450, DRAG = 0.010;
+const ARENA_MIN = 210;   // the wall closes in to this radius by the end of a battle
+const LOBBY_SECS = 25, WINNER_SECS = 10, EVENT_EVERY = 24;
+const MIN_PLAYERS = 12, MAX_PLAYERS = 60;
+const radiusOf = m => 7 + 3.1 * Math.sqrt(m);
+
+// ---------- State ----------
+const settings = { bots: true, likes: 0, goal: 500, battleLen: 180 };
+let streamStart = performance.now();
+let phase = 'lobby', phaseT = 0, round = 1;
+let planets = [], comets = [], particles = [], blackHoles = [];
+let feed = [];            // {text, color, t}
+let banner = null;        // {text, sub, t, dur}
+let sunR = 34, arenaR = ARENA_R, eventT = 0, lastWinner = null, megaNext = false;
+const sessionWins = {};   // code -> wins
+const chapters = [];      // {t, text}
+const cheerCooldown = new Map();
+
+const bgStars = Array.from({ length: 260 }, () => ({
+  x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.4 + 0.2, a: Math.random() * 0.7 + 0.2
+}));
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function pushFeed(text, hue) { feed.unshift({ text, hue, t: 0 }); if (feed.length > 7) feed.pop(); }
+function showBanner(text, sub = '', dur = 3) { banner = { text, sub, t: 0, dur }; }
+
+function spawnPlanet(code, by) {
+  if (planets.some(p => p.code === code) || planets.length >= MAX_PLAYERS) return false;
+  const c = COUNTRIES[code]; loadFlag(c);
+  const r = rand(170, ARENA_R - 40), a = rand(0, Math.PI * 2);
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const v = Math.sqrt(SUN_GM / r) * rand(0.82, 1.08);
+  planets.push({
+    code, c, by, x: CX + Math.cos(a) * r, y: CY + Math.sin(a) * r,
+    vx: -Math.sin(a) * v * dir, vy: Math.cos(a) * v * dir,
+    m: rand(14, 20), alive: true, kills: 0, peak: 0, trail: [], glow: 0, cheers: 0
+  });
+  return true;
+}
+
+// ---------- Chat ----------
+function onChat(user, text) {
+  const code = parseCountry(String(text || ''));
+  if (!code) return;
+  const name = COUNTRIES[code].name;
+  if (phase === 'lobby') {
+    if (spawnPlanet(code, user)) pushFeed(`${user} spawned ${name}`, COUNTRIES[code].hue);
+  } else if (phase === 'battle') {
+    const now = performance.now();
+    if ((cheerCooldown.get(user) || 0) > now) return;
+    cheerCooldown.set(user, now + 2500);
+    const p = planets.find(q => q.code === code && q.alive);
+    if (!p) return;
+    const sp = Math.hypot(p.vx, p.vy) || 1;
+    p.vx += p.vx / sp * 18; p.vy += p.vy / sp * 18;
+    p.m += 0.3; p.glow = 1; p.cheers++;
+  }
+}
+window.orbitChat = onChat;
+
+// Optional bridge: if served by the Node server, accept chat over socket.io
+(function connectSocket() {
+  const s = document.createElement('script');
+  s.src = '/socket.io/socket.io.js';
+  s.onload = () => { try { const io_ = window.io(); io_.on('orbitChat', m => onChat(m.user, m.text)); } catch (e) {} };
+  s.onerror = () => {};
+  document.head.appendChild(s);
+})();
+
+// Demo bots so the game runs without a live chat
+const BOT_NAMES = ['Ravi', 'Lucia', 'Kenji', 'Amara', 'Omar', 'Sofia', 'Liam', 'Mai', 'Diego', 'Zara', 'Ivan', 'Ana', 'Yusuf', 'Chloe'];
+let botT = 0;
+function botTick(dt) {
+  if (!settings.bots) return;
+  botT -= dt;
+  if (botT > 0) return;
+  const user = BOT_NAMES[(Math.random() * BOT_NAMES.length) | 0] + ((Math.random() * 90) | 0);
+  if (phase === 'lobby') {
+    botT = rand(0.4, 1.4);
+    const pick = COUNTRY_LIST[(Math.random() * COUNTRY_LIST.length) | 0];
+    onChat(user, pick[1]);
+  } else if (phase === 'battle') {
+    botT = rand(0.15, 0.6);
+    const alive = planets.filter(p => p.alive);
+    if (alive.length) onChat(user, alive[(Math.random() * alive.length) | 0].c.name);
+  } else botT = 1;
+}
+
+// ---------- Phases ----------
+function startLobby() {
+  phase = 'lobby'; phaseT = 0;
+  planets = []; comets = []; blackHoles = []; particles = [];
+  sunR = 34; arenaR = ARENA_R; feed = [];
+  showBanner(`ROUND ${round}`, 'Type your country in chat to join!', 3);
+}
+function startBattle() {
+  const target = megaNext ? 40 : MIN_PLAYERS;
+  const pool = COUNTRY_LIST.map(c => c[0]).filter(c => !planets.some(p => p.code === c));
+  while (planets.length < target && pool.length) {
+    const i = (Math.random() * pool.length) | 0;
+    spawnPlanet(pool.splice(i, 1)[0], 'auto');
+  }
+  layoutLanes();
+  phase = 'battle'; phaseT = 0; eventT = 30; firstEvent = true;
+  showBanner(megaNext ? 'MEGA ROUND!' : 'FIGHT!', `${planets.length} planets in orbit`, 2.2);
+  if (megaNext) { cometShower(); megaNext = false; }
+}
+function endBattle() {
+  const alive = planets.filter(p => p.alive);
+  const pool = alive.length ? alive : planets.slice();
+  const w = pool.sort((a, b) => b.m - a.m)[0];
+  lastWinner = w;
+  phase = 'winner'; phaseT = 0;
+  if (w) {
+    sessionWins[w.code] = (sessionWins[w.code] || 0) + 1;
+    const t = (performance.now() - streamStart) / 1000;
+    chapters.push({ t, text: `Round ${round} – ${w.c.name} wins` });
+    burst(w.x, w.y, w.c.hue, 120, 420);
+  }
+}
+
+// Spread planets into orbit lanes so the battle starts calm and builds up
+function layoutLanes() {
+  const n = planets.length, lanes = Math.max(2, Math.min(6, Math.ceil(n / 2)));
+  const inner = 190, outer = ARENA_R - 45;
+  const order = planets.slice().sort(() => Math.random() - 0.5);
+  const dirs = Array.from({ length: lanes }, () => (Math.random() < 0.5 ? 1 : -1));
+  for (let L = 0; L < lanes; L++) {
+    const members = order.filter((_, i) => i % lanes === L);
+    const r = inner + (outer - inner) * (lanes === 1 ? 0.5 : L / (lanes - 1));
+    const off = rand(0, Math.PI * 2);
+    members.forEach((p, k) => {
+      const a = off + (k / members.length) * Math.PI * 2;
+      const v = Math.sqrt(SUN_GM / r) * rand(0.97, 1.03);
+      p.x = CX + Math.cos(a) * r; p.y = CY + Math.sin(a) * r;
+      p.vx = -Math.sin(a) * v * dirs[L]; p.vy = Math.cos(a) * v * dirs[L];
+      p.trail = [];
+    });
+  }
+}
+
+// ---------- Events ----------
+function cometShower() {
+  for (let i = 0; i < 16; i++) {
+    const a = rand(0, Math.PI * 2), r = arenaR - 15;
+    comets.push({ x: CX + Math.cos(a) * r, y: CY + Math.sin(a) * r,
+      vx: -Math.cos(a) * rand(90, 180) + rand(-60, 60), vy: -Math.sin(a) * rand(90, 180) + rand(-60, 60), m: 4 });
+  }
+  showBanner('COMET SHOWER', 'Swallow comets to grow!', 2.5);
+}
+function spawnBlackHole() {
+  const a = rand(0, Math.PI * 2), r = rand(Math.min(180, arenaR * 0.5), Math.max(arenaR - 60, 120));
+  blackHoles.push({ x: CX + Math.cos(a) * r, y: CY + Math.sin(a) * r, life: 7, age: 0 });
+  showBanner('BLACK HOLE!', 'Stay away from the void', 2.5);
+}
+function solarFlare() {
+  for (const p of planets) if (p.alive) {
+    const dx = p.x - CX, dy = p.y - CY, d = Math.hypot(dx, dy) || 1;
+    const k = 140 * (1 - Math.min(d / ARENA_R, 1)) + 40;
+    p.vx += dx / d * k; p.vy += dy / d * k;
+  }
+  burst(CX, CY, 40, 80, 500);
+  showBanner('SOLAR FLARE', 'The sun pushes everyone out!', 2.5);
+}
+let firstEvent = true;
+function randomEvent() {
+  if (firstEvent) { firstEvent = false; return cometShower(); }
+  [cometShower, spawnBlackHole, solarFlare][(Math.random() * 3) | 0]();
+}
+
+// ---------- Particles ----------
+function burst(x, y, hue, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2), s = rand(speed * 0.2, speed);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(0.5, 1.3), age: 0, hue });
+  }
+}
+
+// ---------- Physics ----------
+function physics(dt) {
+  const alive = planets.filter(p => p.alive);
+  const t = Math.min(1, phaseT / settings.battleLen);
+  const squeeze = Math.max(0, (t - 0.2) / 0.8);
+  sunR = 34 + squeeze * 70;
+  arenaR = ARENA_R - squeeze * (ARENA_R - ARENA_MIN);
+  const steady = 0.9 * (1 - t) ** 2;   // orbit stabiliser: strong early, gone at the end
+
+  for (const p of alive) {
+    let ax = 0, ay = 0;
+    const dx = CX - p.x, dy = CY - p.y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+    ax += SUN_GM * dx / (d2 * d); ay += SUN_GM * dy / (d2 * d);
+    for (const q of alive) if (q !== p) {
+      const ex = q.x - p.x, ey = q.y - p.y, e2 = ex * ex + ey * ey + 1600, e = Math.sqrt(e2);
+      ax += PLANET_G * q.m * ex / (e2 * e); ay += PLANET_G * q.m * ey / (e2 * e);
+    }
+    for (const b of blackHoles) {
+      const bx = b.x - p.x, by = b.y - p.y, b2 = bx * bx + by * by + 100, bd = Math.sqrt(b2);
+      const k = 1.1e6 * Math.min(1, b.age / 1.2);
+      ax += k * bx / (b2 * bd); ay += k * by / (b2 * bd);
+    }
+    p.vx += ax * dt; p.vy += ay * dt;
+    if (steady > 0) {
+      const spin = Math.sign(dy * p.vx - dx * p.vy) || 1;   // keep the planet's own direction
+      const vc = Math.sqrt(SUN_GM / d);
+      const tx = (dy / d) * vc * spin, ty = (-dx / d) * vc * spin;
+      const k = Math.min(1, steady * dt);
+      p.vx += (tx - p.vx) * k; p.vy += (ty - p.vy) * k;
+    }
+    p.vx *= 1 - DRAG * dt; p.vy *= 1 - DRAG * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+
+    // Arena wall
+    const rx = p.x - CX, ry = p.y - CY, rd = Math.hypot(rx, ry), pr = radiusOf(p.m);
+    if (rd + pr > arenaR) {
+      const nx = rx / rd, ny = ry / rd, vn = p.vx * nx + p.vy * ny;
+      if (vn > 0) { p.vx -= 1.8 * vn * nx; p.vy -= 1.8 * vn * ny; }
+      p.x = CX + nx * (arenaR - pr); p.y = CY + ny * (arenaR - pr);
+    }
+    // Sun
+    if (rd < sunR + pr * 0.5) kill(p, null, `${p.c.name} burned in the Sun`);
+    for (const b of blackHoles) if (Math.hypot(b.x - p.x, b.y - p.y) < 12 + pr * 0.25)
+      kill(p, null, `${p.c.name} vanished into the black hole`);
+  }
+
+  // Planet collisions
+  for (let i = 0; i < alive.length; i++) for (let j = i + 1; j < alive.length; j++) {
+    const a = alive[i], b = alive[j];
+    if (!a.alive || !b.alive) continue;
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), rs = radiusOf(a.m) + radiusOf(b.m);
+    if (d >= rs) continue;
+    const [big, small] = a.m >= b.m ? [a, b] : [b, a];
+    if (big.m > small.m * 1.3) {
+      const M = big.m + small.m;
+      big.vx = (big.vx * big.m + small.vx * small.m) / M;
+      big.vy = (big.vy * big.m + small.vy * small.m) / M;
+      big.m += small.m * 0.85; big.kills++;
+      kill(small, big, `${big.c.name} devoured ${small.c.name}`);
+    } else {
+      const nx = dx / (d || 1), ny = dy / (d || 1);
+      const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+      if (rv < 0) {
+        const imp = -1.9 * rv / (1 / a.m + 1 / b.m);
+        a.vx -= imp / a.m * nx; a.vy -= imp / a.m * ny;
+        b.vx += imp / b.m * nx; b.vy += imp / b.m * ny;
+        a.m *= 0.95; b.m *= 0.95;
+        burst((a.x + b.x) / 2, (a.y + b.y) / 2, a.c.hue, 14, 160);
+      }
+      const push = (rs - d) / 2 + 0.5;
+      a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push;
+    }
+  }
+
+  // Comets
+  for (const cm of comets) {
+    const dx = CX - cm.x, dy = CY - cm.y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+    cm.vx += SUN_GM * 0.5 * dx / (d2 * d) * dt; cm.vy += SUN_GM * 0.5 * dy / (d2 * d) * dt;
+    cm.x += cm.vx * dt; cm.y += cm.vy * dt;
+    if (d < sunR || d > arenaR + 30) cm.dead = true;
+    for (const p of alive) if (p.alive && !cm.dead && Math.hypot(p.x - cm.x, p.y - cm.y) < radiusOf(p.m) + 5) {
+      p.m += cm.m; cm.dead = true; p.glow = 0.6;
+    }
+  }
+  comets = comets.filter(c => !c.dead);
+
+  for (const b of blackHoles) b.age += dt;
+  blackHoles = blackHoles.filter(b => b.age < b.life);
+
+  for (const p of planets) {
+    if (p.alive) { p.peak = Math.max(p.peak, p.m); p.trail.push(p.x, p.y); if (p.trail.length > 40) p.trail.splice(0, 2); }
+    p.glow = Math.max(0, p.glow - dt * 2);
+  }
+}
+
+const killStats = { eaten: 0, sun: 0, hole: 0 };
+function kill(p, by, msg) {
+  if (!p.alive) return;
+  p.alive = false;
+  killStats[by ? 'eaten' : msg.includes('Sun') ? 'sun' : 'hole']++;
+  burst(p.x, p.y, p.c.hue, 50, 320);
+  pushFeed(msg, by ? by.c.hue : p.c.hue);
+}
+
+// ---------- Update ----------
+function update(dt) {
+  phaseT += dt;
+  botTick(dt);
+  for (const f of feed) f.t += dt;
+  if (banner) { banner.t += dt; if (banner.t > banner.dur) banner = null; }
+  for (const q of particles) { q.age += dt; q.x += q.vx * dt; q.y += q.vy * dt; q.vx *= 0.97; q.vy *= 0.97; }
+  particles = particles.filter(q => q.age < q.life);
+
+  if (phase === 'lobby') {
+    // lobby planets drift gently in orbit as a preview
+    for (const p of planets) {
+      const a = Math.atan2(p.y - CY, p.x - CX) + 0.25 * dt, r = Math.hypot(p.x - CX, p.y - CY);
+      p.x = CX + Math.cos(a) * r; p.y = CY + Math.sin(a) * r;
+    }
+    if (phaseT >= LOBBY_SECS) startBattle();
+  } else if (phase === 'battle') {
+    const steps = 3;
+    for (let i = 0; i < steps; i++) physics(dt / steps);
+    eventT -= dt;
+    if (eventT <= 0) { randomEvent(); eventT = EVENT_EVERY; }
+    const alive = planets.filter(p => p.alive).length;
+    if (alive <= 1 || phaseT >= settings.battleLen) endBattle();
+  } else if (phase === 'winner') {
+    if (phaseT >= WINNER_SECS) {
+      round++;
+      if (settings.likes >= settings.goal) {
+        megaNext = true;
+        settings.goal = Math.ceil((settings.likes + 1) / 100) * 100 + 400;
+        syncSettingsUI();
+      }
+      startLobby();
+    }
+  }
+}
+
+// ---------- Drawing ----------
+function drawPlanet(p, r, alpha = 1) {
+  const hue = p.c.hue;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.shadowColor = `hsl(${hue} 90% 60%)`;
+  ctx.shadowBlur = 18 + p.glow * 40;
+  ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  ctx.fillStyle = `hsl(${hue} 70% 45%)`; ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.clip();
+  if (p.c.imgOk) {
+    const img = p.c.img, s = Math.max(2 * r / img.width, 2 * r / img.height);
+    ctx.drawImage(img, p.x - img.width * s / 2, p.y - img.height * s / 2, img.width * s, img.height * s);
+  } else {
+    const g = ctx.createRadialGradient(p.x - r * 0.4, p.y - r * 0.4, r * 0.1, p.x, p.y, r);
+    g.addColorStop(0, `hsl(${hue} 90% 72%)`); g.addColorStop(1, `hsl(${hue} 70% 28%)`);
+    ctx.fillStyle = g; ctx.fillRect(p.x - r, p.y - r, 2 * r, 2 * r);
+    ctx.fillStyle = 'rgba(255,255,255,.92)';
+    ctx.font = `800 ${Math.max(10, r * 0.75)}px Segoe UI, system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(p.code.toUpperCase(), p.x, p.y + 1);
+  }
+  // planet shading
+  const sh = ctx.createRadialGradient(p.x - r * 0.5, p.y - r * 0.5, r * 0.2, p.x, p.y, r * 1.05);
+  sh.addColorStop(0, 'rgba(255,255,255,.18)'); sh.addColorStop(0.6, 'rgba(0,0,0,0)'); sh.addColorStop(1, 'rgba(0,0,0,.55)');
+  ctx.fillStyle = sh; ctx.fillRect(p.x - r, p.y - r, 2 * r, 2 * r);
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = p.glow > 0.05 ? `rgba(255,220,120,${0.4 + p.glow})` : 'rgba(255,255,255,.35)';
+  ctx.lineWidth = p.glow > 0.05 ? 3 : 1.5; ctx.stroke();
+}
+
+function draw() {
+  ctx.fillStyle = '#04050c'; ctx.fillRect(0, 0, W, H);
+  for (const s of bgStars) { ctx.globalAlpha = s.a; ctx.fillStyle = '#fff'; ctx.fillRect(s.x, s.y, s.r, s.r); }
+  ctx.globalAlpha = 1;
+
+  // Arena
+  const ag = ctx.createRadialGradient(CX, CY, 50, CX, CY, ARENA_R);
+  ag.addColorStop(0, 'rgba(60,40,120,.25)'); ag.addColorStop(1, 'rgba(10,14,40,.15)');
+  ctx.fillStyle = ag; ctx.beginPath(); ctx.arc(CX, CY, ARENA_R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(140,160,255,.2)'; ctx.lineWidth = 2; ctx.stroke();
+  if (arenaR < ARENA_R - 1) {
+    ctx.fillStyle = 'rgba(255,60,60,.07)'; ctx.beginPath();
+    ctx.arc(CX, CY, ARENA_R, 0, Math.PI * 2); ctx.arc(CX, CY, arenaR, 0, Math.PI * 2, true); ctx.fill();
+  }
+  ctx.beginPath(); ctx.arc(CX, CY, arenaR, 0, Math.PI * 2);
+  ctx.strokeStyle = arenaR < ARENA_R - 1 ? `rgba(255,90,90,${0.55 + Math.sin(performance.now() / 200) * 0.2})` : 'rgba(140,160,255,.35)';
+  ctx.lineWidth = 3; ctx.stroke();
+  for (let r = 150; r < ARENA_R; r += 115) {
+    ctx.beginPath(); ctx.arc(CX, CY, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(140,160,255,.07)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // Sun
+  const pulse = 1 + Math.sin(performance.now() / 300) * 0.03;
+  const sg = ctx.createRadialGradient(CX, CY, 0, CX, CY, sunR * 2.4 * pulse);
+  sg.addColorStop(0, 'rgba(255,250,220,1)'); sg.addColorStop(0.35, 'rgba(255,190,70,.95)');
+  sg.addColorStop(0.42, 'rgba(255,120,30,.45)'); sg.addColorStop(1, 'rgba(255,80,0,0)');
+  ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(CX, CY, sunR * 2.4 * pulse, 0, Math.PI * 2); ctx.fill();
+
+  // Black holes
+  for (const b of blackHoles) {
+    const k = Math.min(1, b.age / 1.2) * Math.min(1, (b.life - b.age) / 1);
+    const rg = ctx.createRadialGradient(b.x, b.y, 8, b.x, b.y, 90 * k);
+    rg.addColorStop(0, 'rgba(0,0,0,1)'); rg.addColorStop(0.3, 'rgba(120,60,255,.55)'); rg.addColorStop(1, 'rgba(60,0,120,0)');
+    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(b.x, b.y, 90 * k, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(b.x, b.y, 18 * k, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(200,170,255,.8)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(b.x, b.y, (24 + Math.sin(b.age * 8) * 3) * k, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // Comets
+  for (const cm of comets) {
+    ctx.strokeStyle = 'rgba(150,220,255,.5)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cm.x, cm.y); ctx.lineTo(cm.x - cm.vx * 0.12, cm.y - cm.vy * 0.12); ctx.stroke();
+    ctx.fillStyle = '#d8f4ff'; ctx.beginPath(); ctx.arc(cm.x, cm.y, 4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Trails & planets
+  const alive = planets.filter(p => p.alive);
+  for (const p of alive) {
+    const tr = p.trail;
+    for (let i = 2; i < tr.length; i += 2) {
+      ctx.strokeStyle = `hsla(${p.c.hue} 90% 65% / ${(i / tr.length) * 0.35})`;
+      ctx.lineWidth = Math.max(1, radiusOf(p.m) * 0.35 * (i / tr.length));
+      ctx.beginPath(); ctx.moveTo(tr[i - 2], tr[i - 1]); ctx.lineTo(tr[i], tr[i + 1]); ctx.stroke();
+    }
+  }
+  const ranked = alive.slice().sort((a, b) => b.m - a.m);
+  for (const p of alive) drawPlanet(p, radiusOf(p.m));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const [i, p] of ranked.entries()) {
+    if (i > 9 && radiusOf(p.m) < 22) continue;
+    const r = radiusOf(p.m);
+    ctx.font = `700 ${i < 3 ? 17 : 14}px Segoe UI, system-ui, sans-serif`;
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.8)';
+    const label = (i === 0 && phase === 'battle' ? '👑 ' : '') + p.c.name;
+    ctx.strokeText(label, p.x, p.y + r + 4); ctx.fillStyle = '#fff'; ctx.fillText(label, p.x, p.y + r + 4);
+  }
+
+  // Particles
+  for (const q of particles) {
+    ctx.globalAlpha = 1 - q.age / q.life;
+    ctx.fillStyle = `hsl(${q.hue} 95% 65%)`;
+    ctx.fillRect(q.x - 2, q.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  drawHud(ranked);
+  if (phase === 'winner' && lastWinner) drawWinner();
+  if (banner) drawBanner();
+}
+
+function panel(x, y, w, h) {
+  ctx.fillStyle = 'rgba(13,17,36,.86)'; ctx.strokeStyle = 'rgba(120,140,255,.25)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 14); ctx.fill(); ctx.stroke();
+}
+function text(s, x, y, size, color = '#eef1ff', weight = 600, align = 'left') {
+  ctx.font = `${weight} ${size}px Segoe UI, system-ui, sans-serif`;
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'alphabetic'; ctx.fillText(s, x, y);
+}
+function fmtTime(s) { s = Math.max(0, Math.ceil(s)); return `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`; }
+
+function drawHud(ranked) {
+  // Title
+  text('ORBIT ROYALE', 40, 70, 44, '#ffb84d', 900);
+  text(`ROUND ${round}`, 42, 106, 22, '#8b93b8', 700);
+  let status = '';
+  if (phase === 'lobby') status = `JOINING… ${fmtTime(LOBBY_SECS - phaseT)}`;
+  else if (phase === 'battle') status = `BATTLE ${fmtTime(settings.battleLen - phaseT)}`;
+  else status = 'CHAMPION CROWNED';
+  text(status, 42, 140, 22, '#eef1ff', 700);
+
+  // How-to (bottom-left)
+  panel(30, H - 150, 360, 120);
+  text('HOW TO PLAY', 50, H - 118, 17, '#ffb84d', 800);
+  text('Type your COUNTRY in chat to', 50, H - 90, 18);
+  text('spawn your planet. Keep typing', 50, H - 66, 18);
+  text('it during battle to BOOST it!', 50, H - 42, 18);
+
+  // Right sidebar
+  const X = 1290, PW = 600;
+  // Like goal
+  panel(X, 30, PW, 96);
+  text('👍 LIKE GOAL → MEGA ROUND', X + 22, 64, 20, '#ffb84d', 800);
+  const f = Math.min(1, settings.likes / settings.goal);
+  ctx.fillStyle = '#1b2147'; ctx.beginPath(); ctx.roundRect(X + 22, 80, PW - 44, 28, 14); ctx.fill();
+  const lg = ctx.createLinearGradient(X + 22, 0, X + PW - 22, 0);
+  lg.addColorStop(0, '#ff6a3d'); lg.addColorStop(1, '#ffd24d');
+  ctx.fillStyle = lg; ctx.beginPath(); ctx.roundRect(X + 22, 80, Math.max(28, (PW - 44) * f), 28, 14); ctx.fill();
+  text(`${settings.likes} / ${settings.goal}`, X + PW / 2, 101, 18, '#fff', 800, 'center');
+
+  // Leaderboard (current round)
+  panel(X, 142, PW, 420);
+  const aliveN = planets.filter(p => p.alive).length;
+  text(phase === 'lobby' ? `PLANETS JOINED: ${planets.length}` : `ALIVE: ${aliveN} / ${planets.length}`, X + 22, 178, 20, '#ffb84d', 800);
+  const list = phase === 'lobby' ? planets.slice(-9).reverse() : ranked.slice(0, 9);
+  list.forEach((p, i) => {
+    const y = 218 + i * 37;
+    ctx.fillStyle = `hsl(${p.c.hue} 75% 55%)`; ctx.beginPath(); ctx.arc(X + 38, y - 7, 10, 0, Math.PI * 2); ctx.fill();
+    text(`${phase === 'lobby' ? '' : (i + 1) + '. '}${p.c.name}`, X + 58, y, 20, '#eef1ff', 700);
+    const right = phase === 'lobby' ? (p.by === 'auto' ? '' : `by ${p.by}`)
+      : `mass ${p.m.toFixed(0)} · ${p.kills} eaten · ${p.cheers} boosts`;
+    text(right, X + PW - 22, y, 16, '#8b93b8', 600, 'right');
+  });
+
+  // Session champions
+  panel(X, 578, PW, 200);
+  text('🏆 CHAMPIONS THIS STREAM', X + 22, 614, 20, '#ffb84d', 800);
+  const champs = Object.entries(sessionWins).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  if (!champs.length) text('No champion yet. Will it be yours?', X + 22, 652, 18, '#8b93b8');
+  champs.forEach(([code, n], i) => {
+    const y = 652 + i * 32;
+    text(`${i + 1}. ${COUNTRIES[code].name}`, X + 22, y, 19, '#eef1ff', 700);
+    text(`${n} win${n > 1 ? 's' : ''}`, X + PW - 22, y, 18, '#ffd24d', 800, 'right');
+  });
+
+  // Feed
+  panel(X, 794, PW, 256);
+  text('LIVE FEED', X + 22, 828, 18, '#ffb84d', 800);
+  feed.forEach((f, i) => {
+    ctx.globalAlpha = Math.max(0.25, 1 - i * 0.12);
+    ctx.fillStyle = `hsl(${f.hue} 80% 60%)`; ctx.fillRect(X + 22, 846 + i * 29, 4, 20);
+    text(f.text.length > 52 ? f.text.slice(0, 51) + '…' : f.text, X + 36, 863 + i * 29, 17);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawBanner() {
+  const b = banner, k = Math.min(1, b.t / 0.25) * Math.min(1, (b.dur - b.t) / 0.4);
+  ctx.globalAlpha = Math.max(0, k);
+  ctx.textAlign = 'center';
+  ctx.font = '900 84px Segoe UI, system-ui, sans-serif';
+  ctx.lineWidth = 10; ctx.strokeStyle = 'rgba(0,0,0,.7)';
+  ctx.strokeText(b.text, CX, 300); ctx.fillStyle = '#ffd24d'; ctx.fillText(b.text, CX, 300);
+  if (b.sub) {
+    ctx.font = '700 30px Segoe UI, system-ui, sans-serif';
+    ctx.lineWidth = 6; ctx.strokeText(b.sub, CX, 345); ctx.fillStyle = '#fff'; ctx.fillText(b.sub, CX, 345);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawWinner() {
+  const w = lastWinner, k = Math.min(1, phaseT / 0.6);
+  ctx.fillStyle = `rgba(4,5,12,${0.9 * k})`; ctx.fillRect(0, 0, 1260, H);
+  const fake = Object.assign({}, w, { x: CX, y: 470, glow: 0.4 + Math.sin(phaseT * 4) * 0.3 });
+  drawPlanet(fake, 120 * k);
+  ctx.textAlign = 'center';
+  text('🏆 CHAMPION 🏆', CX, 250, 46, '#ffd24d', 900, 'center');
+  text(w.c.name.toUpperCase(), CX, 680, 72, '#fff', 900, 'center');
+  text(`Swallowed ${w.kills} · Peak mass ${w.peak.toFixed(0)} · ${w.cheers} boosts from chat`, CX, 725, 26, '#8b93b8', 700, 'center');
+  text(`Next round in ${fmtTime(WINNER_SECS - phaseT)}`, CX, 790, 24, '#ffb84d', 700, 'center');
+}
+
+// ---------- Chapters ----------
+function fmtChapter(s) {
+  s = Math.floor(s); const h = (s / 3600) | 0, m = ((s % 3600) / 60) | 0, sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
+}
+function chaptersText() {
+  return ['0:00 Stream start', ...chapters.map(c => `${fmtChapter(c.t)} 🏆 ${c.text}`)].join('\n');
+}
+function downloadChapters() {
+  const blob = new Blob([chaptersText() + '\n'], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'orbit-royale-chapters.txt'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+window.orbitChapters = chaptersText;
+window.orbitFastForward = secs => { for (let i = 0; i < secs * 30; i++) update(1 / 30); };
+window.orbitState = () => ({ phase, round, t: +phaseT.toFixed(1), alive: planets.filter(p => p.alive).length, total: planets.length, kills: { ...killStats } });
+
+// ---------- Settings UI ----------
+const $ = id => document.getElementById(id);
+function syncSettingsUI() { $('setLikes').value = settings.likes; $('setGoal').value = settings.goal; }
+$('setBots').onchange = e => settings.bots = e.target.checked;
+$('setLikes').oninput = e => settings.likes = Math.max(0, +e.target.value || 0);
+$('setGoal').oninput = e => settings.goal = Math.max(1, +e.target.value || 1);
+$('setLen').oninput = e => settings.battleLen = Math.max(30, +e.target.value || 180);
+$('setChat').onkeydown = e => { if (e.key === 'Enter') { onChat('you', e.target.value); e.target.value = ''; } };
+$('btnChapters').onclick = downloadChapters;
+$('btnClock').onclick = () => { streamStart = performance.now(); chapters.length = 0; };
+window.orbitSetLikes = n => { settings.likes = n; syncSettingsUI(); };
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase();
+  if (k === 's') { const s = $('settings'); s.style.display = s.style.display === 'block' ? 'none' : 'block'; }
+  if (k === 'c') downloadChapters();
+  if (k === 'n') { if (phase === 'lobby') startBattle(); else if (phase === 'battle') endBattle(); else phaseT = WINNER_SECS; }
+});
+
+// ---------- Main loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+startLobby();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
